@@ -1,0 +1,124 @@
+name: Descarga diaria (ERA5-Land e IFS)
+
+# Cada madrugada baja lo que necesita el mapa de riesgo de incendios y lo deja
+# como asset del Release `datos`: el ERA5-Land horario del mes en curso (CDS)
+# y la previsión IFS en los 5,605 nodos (Open-Meteo). Aquí no se calcula nada
+# y no hay commits: lo bajado nunca entra en el historial de git. Los assets
+# de más de tres días se borran en cada corrida.
+#
+# Secreto: CDSAPI_KEY (Copernicus Climate Data Store).
+
+on:
+  schedule:
+    # 03:03 de Madrid en horario de verano y 02:02 en invierno. GitHub retrasa
+    # las tareas programadas varias horas; a esas horas la fecha UTC sigue
+    # siendo la de Madrid.
+    - cron: "3 1 * 4-10 *"
+    - cron: "2 1 * 1-3,11,12 *"
+  workflow_dispatch:
+
+concurrency:
+  group: descarga
+  cancel-in-progress: false
+
+permissions:
+  contents: write        # para subir y borrar los assets del Release
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  RELEASE: datos
+
+jobs:
+  fecha:
+    # Una sola fecha para toda la corrida, aunque un job cruce la medianoche.
+    runs-on: ubuntu-latest
+    outputs:
+      fecha: ${{ steps.f.outputs.fecha }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: f
+        run: echo "fecha=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+      - name: Release `datos`
+        run: |
+          gh release view "$RELEASE" >/dev/null 2>&1 || gh release create "$RELEASE" \
+            --title "datos del día" \
+            --notes "Assets que sube y borra la descarga diaria. No editar a mano."
+
+  ifs:
+    needs: fecha
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    outputs:
+      fichero: ${{ steps.s.outputs.fichero }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Previsión IFS (Open-Meteo, 5,605 nodos)
+        run: python -u bajar_ifs.py --fecha "${{ needs.fecha.outputs.fecha }}"
+      - id: s
+        name: Subir al Release
+        run: |
+          f="datos/ifs_malla_${{ needs.fecha.outputs.fecha }}.parquet"
+          gh release upload "$RELEASE" "$f" --clobber
+          echo "fichero=$(basename "$f")" >> "$GITHUB_OUTPUT"
+
+  era5land:
+    needs: fecha
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    outputs:
+      fichero: ${{ steps.s.outputs.fichero }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Credenciales de CDS
+        env:
+          CDSAPI_KEY: ${{ secrets.CDSAPI_KEY }}
+        run: printf 'url: https://cds.climate.copernicus.eu/api\nkey: %s\n' "$CDSAPI_KEY" > ~/.cdsapirc
+      - name: ERA5-Land del mes en curso (CDS)
+        run: timeout 3h python -u bajar_era5land.py --fecha "${{ needs.fecha.outputs.fecha }}"
+      - id: s
+        name: Subir al Release
+        run: |
+          f=$(ls datos/era5land_*.nc)
+          gh release upload "$RELEASE" "$f" --clobber
+          echo "fichero=$(basename "$f")" >> "$GITHUB_OUTPUT"
+
+  listo:
+    # Solo si han salido las dos descargas: el aviso de «datos listos» se sube
+    # lo último, y después se borra lo viejo.
+    needs: [fecha, ifs, era5land]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Aviso de datos listos (con el SHA-256 de lo que hay en el Release)
+        run: |
+          mkdir -p datos
+          gh release download "$RELEASE" --dir datos \
+            --pattern "${{ needs.ifs.outputs.fichero }}" --pattern "${{ needs.era5land.outputs.fichero }}"
+          python manifiesto.py --fecha "${{ needs.fecha.outputs.fecha }}" \
+            "datos/${{ needs.ifs.outputs.fichero }}" "datos/${{ needs.era5land.outputs.fichero }}"
+          gh release upload "$RELEASE" "datos/listo_${{ needs.fecha.outputs.fecha }}.json" --clobber
+      - name: Borrar los assets de más de tres días
+        run: |
+          corte=$(date -u -d "3 days ago" +%s)
+          gh release view "$RELEASE" --json assets \
+            --jq '.assets[] | "\(.name) \(.createdAt)"' | while read -r nombre creado; do
+              if [ "$(date -u -d "$creado" +%s)" -lt "$corte" ]; then
+                echo "borrando $nombre ($creado)"
+                gh release delete-asset "$RELEASE" "$nombre" --yes
+              fi
+            done

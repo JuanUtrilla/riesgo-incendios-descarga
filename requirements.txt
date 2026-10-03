@@ -1,0 +1,6 @@
+# Las mismas versiones que la cadena de cálculo.
+numpy==2.4.6
+pandas==3.0.5
+pyarrow==25.0.1
+requests==2.34.2
+cdsapi==0.7.7

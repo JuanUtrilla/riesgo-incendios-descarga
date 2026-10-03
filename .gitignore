@@ -1,0 +1,10 @@
+# lo descargado nunca entra en git: va como asset del Release `datos`
+datos/
+*.nc
+*.parquet
+*.parcial
+*.tmp
+*.zip
+.cdsapirc
+.env
+__pycache__/
