@@ -78,9 +78,9 @@ def descarga(ruta, past_dias=7, max_nodos=None):
                 time.sleep(espera)
                 espera = min(espera * 2, 900)
                 continue
-            if r.status_code != 429:
+            if r.status_code != 429 and r.status_code < 500:
                 break
-            print(f"    429 · esperando {espera}s", flush=True)
+            print(f"    {r.status_code} · esperando {espera}s", flush=True)
             time.sleep(espera)
             espera = min(espera * 2, 900)
         r.raise_for_status()
